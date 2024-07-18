@@ -1618,7 +1618,7 @@ class Model:
             q_size = self.num_attn_heads * self.head_size
             kv_size = self.num_kv_heads * self.head_size
             model = QuantModel.from_pretrained(self.quant_type, input_path, self.quant_attrs["bits"], self.quant_attrs["group_size"], self.quant_attrs["use_g_idx"], q_size, kv_size, self.intermediate_size)
-        elif "adapter_config.json" in os.listdir(input_path):
+        elif os.path.isdir(input_path) and "adapter_config.json" in os.listdir(input_path):
             # Load LoRA PyTorch model
             from peft import AutoPeftModelForCausalLM
             extra_kwargs = {} if os.path.exists(input_path) else {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir}
@@ -2330,7 +2330,7 @@ class Phi3Small8KModel(Model):
 
         # Make input MatMul and Add nodes
         up_matmul_basename = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
-        up_matmul_name = self.make_matmul(mlp.up_proj.weight.detach().numpy(), up_matmul_basename, root_input)
+        up_matmul_name = self.make_matmul(mlp.up_proj, up_matmul_basename, root_input)
         up_add_name = f"/model/layers.{layer_id}/mlp/up_proj/Add"
         self.make_add_bias(mlp.up_proj.bias.detach().numpy(), up_add_name, f"{up_matmul_name}/output_0")
 
@@ -2376,7 +2376,7 @@ class Phi3Small8KModel(Model):
 
         # Make output MatMul and Add nodes
         down_matmul_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
-        down_matmul_name = self.make_matmul(mlp.down_proj.weight.detach().numpy(), down_matmul_basename, f"{mul_name}/output_0")
+        down_matmul_name = self.make_matmul(mlp.down_proj, down_matmul_basename, f"{mul_name}/output_0")
         down_add_name = f"/model/layers.{layer_id}/mlp/down_proj/Add"
         self.make_add_bias(mlp.down_proj.bias.detach().numpy(), down_add_name, f"{down_matmul_name}/output_0")
 
@@ -2419,7 +2419,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
     hf_name = input_path if os.path.isdir(input_path) else model_name
 
-    is_peft = "adapter_config.json" in os.listdir(input_path)
+    is_peft = os.path.isdir(input_path) and "adapter_config.json" in os.listdir(input_path)
     peft_config = None
     if is_peft:
         from peft import PeftConfig
@@ -2448,12 +2448,8 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == 131072:
             onnx_model = Phi3Mini128KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == 8192:
-            print("WARNING: This model only works for CUDA currently because `SparseAttention` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
-            execution_provider = "cuda"
             onnx_model = Phi3Small8KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == 131072:
-            print("WARNING: This model only works for CUDA currently because `SparseAttention` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
-            execution_provider = "cuda"
             onnx_model = Phi3Small128KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3VForCausalLM":
             print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
