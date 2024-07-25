@@ -126,6 +126,7 @@ def generate_files(lines, args):
             add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.lib")
             add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.dll")
             add_native_artifact_if_exists(lines, runtime, "d3d12core.dll")
+            add_native_artifact_if_exists(lines, runtime, "directml.dll")
         if runtime.startswith("linux"):
             add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai.so")
 
