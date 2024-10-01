@@ -1,11 +1,11 @@
 ﻿// Copyright (c) Microsoft Corporation. All rights reserved.
-
+// Licensed under the MIT License.
 #pragma once
 
-// Licensed under the MIT License.
 #include <algorithm>
 #include <array>
 #include <assert.h>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include "filesystem.h"
@@ -31,6 +31,7 @@
 using cudaStream_t = void*;
 #endif
 
+#include "leakcheck.h"
 #include "smartptrs.h"
 #include "models/onnxruntime_api.h"
 #include "models/debugging.h"
@@ -55,50 +56,28 @@ enum struct DeviceType {
 
 std::string to_string(DeviceType device_type);
 
-struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
-  GeneratorParams() = default;  // This constructor is only used if doing a custom model handler vs built-in
+struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChecked<GeneratorParams> {
+  GeneratorParams(const Config& config);  // This constructor is only used for internal generator benchmarks
   GeneratorParams(const Model& model);
 
-  Config::Search search;
-
-  // Read only values copied from model
-  int pad_token_id{};
-  int eos_token_id{};
-  int vocab_size{};
-  int context_length{};
+  const Config& config;                  // The model outlives the GeneratorParams
+  Config::Search search{config.search};  // Copy of the search parameters from the config
 
   int batch_size{1};
   int max_batch_size{0};
   bool use_cuda_graph{};
   int sequence_length{};
-  int hidden_size{};
   int BatchBeamSize() const { return search.num_beams * batch_size; }
 
   DeviceType device_type{DeviceType::CPU};
   cudaStream_t cuda_stream{};
 
-#if 0
-  struct Bert {
-    std::span<const int32_t> input_ids;  // Array of [batchsize][sequence_length]
-  };
-
-  struct Gpt {
-    using Gpt=Bert;
-  };
-
-  struct T5 {
-    std::span<const int32_t> encoder_input_ids;  // Array of [batchsize][sequence_length]
-    std::span<const int32_t> decoder_input_ids;  // Array of [batchsize][sequence_length]
-  };
-  using Bart=T5;
-
-#endif
-
   // TODO: Move this to a separate GPT struct
   std::span<const int32_t> input_ids;  // Array of [batchsize][sequence_length]
 
   struct Whisper {
-    std::shared_ptr<Tensor> input_features;  // float32 [batch_size, number_of_mels, something that is 3000]
+    std::shared_ptr<Tensor> input_features;   // float32 [batch_size, number_of_mels, number_of_frames]
+    std::shared_ptr<Tensor> alignment_heads;  // int32 [num_alignment_heads, 2]
   };
 
   std::variant<Whisper> inputs;
@@ -121,11 +100,9 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
 
  private:
   bool is_cuda_graph_enabled_{};
-  const Config* config_{nullptr};  // Non owning pointer to the config.
-                                   // The model outlives the GeneratorParams
 };
 
-struct Generator {
+struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
 
   bool IsDone() const;
@@ -159,7 +136,7 @@ OrtEnv& GetOrtEnv();
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model);
-std::shared_ptr<GeneratorParams> CreateGeneratorParams();  // For benchmarking purposes only
+std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Config& config);  // For benchmarking purposes only
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);
 std::vector<std::vector<int32_t>> Generate(const Model& model, const GeneratorParams& params);  // Uses CreateGenerator and a simple loop to return the entire sequence
 

@@ -13,15 +13,44 @@ namespace Generators {
 
 static bool _ = (Ort::InitApi(), false);
 
-OrtGlobals::OrtGlobals() : env_{OrtEnv::Create(OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR)} {}
+OrtGlobals::OrtGlobals()
+    : env_{OrtEnv::Create(OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR)} {
+  auto arena_config = OrtArenaCfg::Create(0, -1, -1, -1);
+  Ort::Allocator& allocator_cpu{Ort::Allocator::GetWithDefaultOptions()};
+  env_->CreateAndRegisterAllocator(allocator_cpu.GetInfo(), *arena_config);
+}
 
-std::unique_ptr<OrtGlobals>& GetOrtGlobals() {
+// Ensure Shutdown() has been called before process exit
+struct ValidateShutdown {
+  ~ValidateShutdown() {
+    if (GetOrtGlobals()) {
+      std::cerr << "OGA Error: Shutdown must be called before process exit, please check the documentation for the proper API to call to ensure clean shutdown." << std::endl;
+      std::abort();
+    }
+  }
+};
+
+std::unique_ptr<OrtGlobals>&
+GetOrtGlobals() {
   static auto globals = std::make_unique<OrtGlobals>();
+  static auto validate = std::make_unique<ValidateShutdown>();  // Must be after the above line so the destructor runs before the above destructor
   return globals;
 }
 
+// Used by Shutdown() to display the counts and types of any leaked objects
+template <typename... Types>
+bool LeakTypeList<Types...>::Dump() {
+  ((LeakChecked<Types>::Count() != 0 ? std::cerr << "OGA Error: " << LeakChecked<Types>::Count() << " instances of " << typeid(Types).name() << " were leaked." << std::endl : std::cerr), ...);
+  return ((LeakChecked<Types>::Count() != 0) || ...);
+}
+
 void Shutdown() {
-  GetOrtGlobals().reset();
+  if (LeakTypes::Dump()) {
+    std::cerr << "    Please see the documentation for the API being used to ensure proper cleanup." << std::endl;
+    std::abort();
+  }
+
+  GetOrtGlobals().reset();  // Delete now because on process exit is too late
 }
 
 OrtEnv& GetOrtEnv() {
@@ -40,16 +69,14 @@ std::string to_string(DeviceType device_type) {
   throw std::runtime_error("Unknown device type");
 }
 
+GeneratorParams::GeneratorParams(const Config& config) : config{config} {
+}
+
 GeneratorParams::GeneratorParams(const Model& model)
-    : search{model.config_->search},
-      pad_token_id{model.config_->model.pad_token_id},
-      eos_token_id{model.config_->model.eos_token_id},
-      vocab_size{model.config_->model.vocab_size},
-      hidden_size{model.config_->model.decoder.hidden_size},
+    : config{*model.config_.get()},
       device_type{model.device_type_},
       cuda_stream{model.cuda_stream_},
-      is_cuda_graph_enabled_{IsCudaGraphEnabled(model.config_->model.decoder.session_options)},
-      config_{model.config_.get()} {
+      is_cuda_graph_enabled_{IsCudaGraphEnabled(model.config_->model.decoder.session_options)} {
   use_cuda_graph = is_cuda_graph_enabled_;
   if (use_cuda_graph) {
     max_batch_size = 1;  // set it to 1 by default
@@ -83,7 +110,7 @@ void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
     } else {
       // If the nominal name is found in the map, use the graph name.
       // Else, use the nominal name as the graph name.
-      [[maybe_unused]] const auto [graph_name, found] = config_->GetGraphName(name);
+      [[maybe_unused]] const auto [graph_name, found] = config.GetGraphName(name);
       extra_inputs.push_back({graph_name, tensor});
     }
   }
@@ -115,8 +142,8 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
     throw std::runtime_error("max_length (" + std::to_string(params.search.max_length) + ") cannot be greater than model context_length (" + std::to_string(model.config_->model.context_length) + ")");
   if (params.batch_size < 1)
     throw std::runtime_error("batch_size must be 1 or greater, is " + std::to_string(params.batch_size));
-  if (params.vocab_size < 1)
-    throw std::runtime_error("vocab_size must be 1 or greater, is " + std::to_string(params.vocab_size));
+  if (params.config.model.vocab_size < 1)
+    throw std::runtime_error("vocab_size must be 1 or greater, is " + std::to_string(params.config.model.vocab_size));
   if (params.sequence_length >= params.search.max_length)
     throw std::runtime_error("input sequence_length (" + std::to_string(params.sequence_length) + ") is >= max_length (" + std::to_string(params.search.max_length) + ")");
   if (params.input_ids.empty() || params.input_ids.data() == nullptr)
@@ -148,7 +175,12 @@ bool Generator::IsDone() const {
   if (computed_logits_)
     throw std::runtime_error("IsDone() can't be called in the middle of processing logits");
 
-  return search_->IsDone();
+  bool is_done = search_->IsDone();
+  if (is_done) {
+    state_->Finalize();
+  }
+
+  return is_done;
 }
 
 void Generator::GenerateNextToken() {
