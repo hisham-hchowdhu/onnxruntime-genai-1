@@ -126,15 +126,18 @@ void InputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
         ComPtr<ID3D12Resource> source_resource;
         Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value_int32_->GetTensorMutableRawData(), &source_resource));
 
-        auto source = std::span<const uint8_t>(
-            reinterpret_cast<const uint8_t*>(new_tokens.CpuSpan().data()),
-            new_tokens.CpuSpan().size_bytes());
+        // cpu_span next_tokens_unk should be removed and next_token directly set to value_int32_
+        // however search module is currently cpu only, and adding dml requires lots of class overhauls
+        // if dml were to be added to search, we can elminate sampling on cpu altogether
+        // however that's a bigger effort, adding dml to search to save 4 bytes doesn't seem worth it
+        int32_t next_token_value = cpu_span<int32_t>(next_tokens_unk.Span())[0];
 
-        model_.GetDmlUploadHeap()->BeginUploadToGpu(
-            source_resource.Get(),
-            0,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-            source);
+        void* upload_heap_data = nullptr;
+        THROW_IF_FAILED(source_resource->Map(0, nullptr, &upload_heap_data));
+
+        *(int32_t*)upload_heap_data = next_token_value;
+
+        source_resource->Unmap(0, nullptr);
 
         DmlHelpers::DmlCastInputToOutput(
             model_.GetDmlExecutionContext(),

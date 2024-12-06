@@ -53,12 +53,12 @@ DeviceSpan<float> Logits::Get() {
     const size_t element_count_last_token = shape_[0] * shape_[2];
 
     // create new OrtValue for logits_of_last_token and use output_last_tokens_ to hold it
-    output_last_tokens_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_last, type_);
+    //output_last_tokens_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
 
-    if (type_ == Ort::TypeToTensorType<Ort::Float16_t>)
-      logits_of_last_token_fp32_ = OrtValue::CreateTensor<float>(*model_.allocator_device_, shape_);
+    //if (type_ == Ort::TypeToTensorType<Ort::Float16_t>)
+    //  logits_of_last_token_fp32_ = OrtValue::CreateTensor<float>(*model_.allocator_device_, shape_);
 
-    logits_of_last_token = output_last_tokens_.get();
+    //logits_of_last_token = output_last_tokens_.get();
 
     size_t element_size = type_ == Ort::TypeToTensorType<float> ? 4 : 2;
     size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
@@ -69,7 +69,14 @@ DeviceSpan<float> Logits::Get() {
       for (int beam_index = 0; beam_index < num_beams; beam_index++) {
         switch (model_.device_type_) {
           case DeviceType::DML: {
+            logits_of_last_token = output_raw_.get();
+            // Skipping the CopyBufferRegion for first run, first two tokens will be different
+            // Since we are keeping the dml cast, if we do cpu copy it would require a flush before cast
+            // TODO: Further discussion needed to see we need to want to do cpu cast instead which should be able to bypass
+            // this CopyBufferRegion completely
+
 #if USE_DML
+            /*
             ComPtr<ID3D12Resource> source_resource;
             Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, output_raw_->GetTensorMutableRawData(), &source_resource));
 
@@ -88,6 +95,7 @@ DeviceSpan<float> Logits::Get() {
                 source_offset,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 size_in_bytes);
+            */
 #endif
           } break;
 
@@ -139,12 +147,6 @@ DeviceSpan<float> Logits::Get() {
 
   assert(shape_[1] == 1);
 
-#if USE_DML
-  // DML doesn't support on-device scoring yet, so we need to download some data to the CPU
-  if (model_.device_type_ == DeviceType::DML) {
-    value32_cpu_ = OrtValue::CreateTensor<float>(model_.allocator_cpu_, shape_last);
-  }
-#endif
 
   if (logits_.empty() || logits_of_last_token->GetTensorMutableRawData() != logits_.Span().data())
     logits_ = WrapTensor<float>(*state_.params_->p_device, *logits_of_last_token);
@@ -170,19 +172,29 @@ DeviceSpan<float> Logits::Get() {
         model_.allocator_device_,
         logits_of_last_token->GetTensorMutableData<float>(),
         &gpu_resource));
-    auto cpu_tensor = value32_cpu_->GetTensorMutableData<float>();
 
-    model_.GetDmlReadbackHeap()->ReadbackFromGpu(
-        std::span(reinterpret_cast<uint8_t*>(cpu_tensor), element_count * sizeof(float)),
-        gpu_resource.Get(),
-        0,
-        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    std::vector<D3D12_RESOURCE_BARRIER> barriers;
 
-    auto batched_logits_cpu = cpu_span<float>{cpu_tensor, element_count};
+    barriers.push_back(CD3DX12_RESOURCE_BARRIER::Transition(gpu_resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST));
+    model_.GetDmlExecutionContext()->ResourceBarrier(barriers);
+
+    model_.GetDmlExecutionContext()->Flush();
+    model_.GetDmlExecutionContext()->GetCurrentCompletionEvent().WaitForSignal();
+    model_.GetDmlExecutionContext()->ReleaseCompletedReferences();
+
+    CD3DX12_RANGE readRange(0, element_count);
+
+    void* readback_heap_data = nullptr;
+    THROW_IF_FAILED(gpu_resource->Map(0, &readRange, &readback_heap_data));
+
+    gpu_resource->Unmap(0, nullptr);
+
+    auto batched_logits_cpu = cpu_span<float>{(float*)readback_heap_data, element_count};
     HandleEOSArray(batched_logits_cpu);
 
-    logits_ = WrapTensor<float>(*state_.params_->p_device, *value32_cpu_);
-    return logits_;
+    DeviceInterface& device = *state_.params_->p_device;
+
+    logits_ = device.WrapMemory(std::span<float>{(float*)readback_heap_data, element_count});
   }
 #endif
 
