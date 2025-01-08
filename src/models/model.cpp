@@ -124,11 +124,13 @@ State::~State() {
 }
 
 std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, int32_t pad_token_id) {
-  bool pad_right_{true};
+  bool pad_right_{false};
 
   size_t max_length = 0;
   for (auto& sequence : sequences)
     max_length = std::max(max_length, sequence.size());
+
+  max_length = 2000;
 
   std::vector<int32_t> result(max_length * sequences.size());
   std::span<int32_t> result_span(result);
