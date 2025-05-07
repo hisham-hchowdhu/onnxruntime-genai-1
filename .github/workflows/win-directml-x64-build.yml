@@ -12,6 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
   AZCOPY_AUTO_LOGIN_TYPE: MSI
   AZCOPY_MSI_CLIENT_ID: 63b63039-6328-442f-954b-5a64d124e5b4
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
@@ -38,6 +39,16 @@ jobs:
       with:
         python-version: '3.11.x'
         architecture: 'x64'
+
+    - name: Setup VCPKG
+      uses: microsoft/onnxruntime-github-actions/setup-build-tools@v0.0.6
+      with:
+        vcpkg-version: '2025.03.19'
+        vcpkg-hash: '17e96169cd3f266c4716fcdc1bb728e6a64f103941ece463a2834d50694eba4fb48f30135503fd466402afa139abc847ef630733c442595d1c34979f261b0114'
+        cmake-version: '3.31.6'
+        cmake-hash: '0f1584e8666cf4a65ec514bd02afe281caabf1d45d2c963f3151c41484f457386aa03273ab25776a670be02725354ce0b46f3a5121857416da37366342a833a0'
+        add-cmake-to-path: 'true'
+        disable-terrapin: 'false'
 
     - name: Download OnnxRuntime Nightly
       shell: pwsh
@@ -80,7 +91,7 @@ jobs:
 
     - name: Configure CMake
       run: |
-        cmake --preset windows_x64_directml_release -DTEST_PHI2=False
+        cmake --preset windows_x64_directml_release -DTEST_PHI2=True
 
     - name: Build with CMake
       run: |
@@ -92,6 +103,10 @@ jobs:
         python -m pip install -r test\python\directml\torch\requirements.txt
         python -m pip install -r test\python\directml\ort\requirements.txt
         python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
+
+    - name: Run the Python Tests
+      run: |
+        python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models" --e2e
 
     - name: Verify Build Artifacts
       if: always()
